@@ -1,0 +1,25 @@
+{
+    "initialize_firmware_retraction": {
+        "label": "Initialize Firmware Retraction",
+        "description": "Add M207 and M208 commands to start Gcode to setup firmware retraction settings.",
+        "type": "bool",
+        "default_value": false,
+        "value": false,
+        "settable_per_mesh": false,
+        "settable_per_extruder": false,
+        "settable_per_meshgroup": false,
+        "children": {
+            "remove_slicer_z_hops": {
+                "label": "Remove Slicer Z Hop",
+                "description": "Remove Z Hop moves added by slicer since they are handled by Marlin firmware retraction.",
+                "type": "bool",
+                "default_value": false,
+                "value": false,
+                "settable_per_mesh": false,
+                "settable_per_extruder": false,
+                "settable_per_meshgroup": false,
+                "enabled": "resolveOrValue('initialize_firmware_retraction')"
+            }
+        }
+    }
+}

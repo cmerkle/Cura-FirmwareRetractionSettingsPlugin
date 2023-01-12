@@ -10,6 +10,13 @@ from UM.Settings.SettingDefinition import SettingDefinition
 from UM.Settings.DefinitionContainer import DefinitionContainer
 from UM.Settings.ContainerRegistry import ContainerRegistry
 from UM.Logger import Logger
+from UM.Version import Version
+
+import collections
+import json
+import os.path
+
+from typing import List, Optional, Any, Dict, TYPE_CHECKING
 
 class FirmwareRetractionSettingsPlugin(Extension):
     def __init__(self):
@@ -19,17 +26,27 @@ class FirmwareRetractionSettingsPlugin(Extension):
 
         self._i18n_catalog = None
 
-        self._settings_dict = OrderedDict()
-        self._settings_dict["initialize_firmware_retraction"] = {
-            "label": "Initialize Firmware Retraction",
-            "description": "Add M207 and M208 commands to start Gcode to setup firmware retraction settings.",
-            "type": "bool",
-            "default_value": False,
-            "value": False,
-            "settable_per_mesh": False,
-            "settable_per_extruder": False,
-            "settable_per_meshgroup": False
-        }
+        self._settings_dict = {}  # type: Dict[str, Any]
+        self._expanded_categories = []  # type: List[str]  # temporary list used while creating nested settings
+
+        try:
+            api_version = self._application.getAPIVersion()
+        except AttributeError:
+            # UM.Application.getAPIVersion was added for API > 6 (Cura 4)
+            # Since this plugin version is only compatible with Cura 3.5 and newer, and no version-granularity
+            # is required before Cura 4.7, it is safe to assume API 5
+            api_version = Version(5)
+
+        if api_version < Version("7.3.0"):
+            settings_definition_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "firmware_retraction35.def.json")
+        else:
+            settings_definition_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "firmware_retraction47.def.json")
+        try:
+            with open(settings_definition_path, "r", encoding = "utf-8") as f:
+                self._settings_dict = json.load(f, object_pairs_hook = collections.OrderedDict)
+        except:
+            Logger.logException("e", "Could not load firmware retraction settings definition")
+            return
 
         ContainerRegistry.getInstance().containerLoadComplete.connect(self._onContainerLoadComplete)
 
@@ -54,21 +71,38 @@ class FirmwareRetractionSettingsPlugin(Extension):
             # skip extruder definitions
             return
 
-        travel_category = container.findDefinitions(key="travel")
-        firmware_retraction_setting = container.findDefinitions(key=list(self._settings_dict.keys())[0])
-        if travel_category and not firmware_retraction_setting:
-            # this machine doesn't have a firmware retraction setting yet
-            travel_category = travel_category[0]
-            for setting_key, setting_dict in self._settings_dict.items():
+        try:
+            travel_category = container.findDefinitions(key="travel")[0]
+        except IndexError:
+            Logger.log("e", "Could not find parent category setting to add settings to")
+            return
 
-                definition = SettingDefinition(setting_key, container, travel_category, self._i18n_catalog)
-                definition.deserialize(setting_dict)
+        for setting_key in self._settings_dict.keys():
+            setting_definition = SettingDefinition(setting_key, container, travel_category, self._i18n_catalog)
+            setting_definition.deserialize(self._settings_dict[setting_key])
 
-                # add the setting to the already existing travel settingdefinition
-                travel_category._children.append(definition)
-                container._definition_cache[setting_key] = definition
-                container._updateRelations(definition)
+            # add the setting to the already existing travel settingdefinition
+            travel_category._children.append(setting_definition)
+            container._definition_cache[setting_key] = setting_definition
 
+            self._expanded_categories = self._application.expandedCategories.copy()
+            self._updateAddedChildren(container, setting_definition)
+            self._application.setExpandedCategories(self._expanded_categories)
+            self._expanded_categories = []  # type: List[str]
+            container._updateRelations(setting_definition)
+
+    def _updateAddedChildren(self, container: DefinitionContainer, setting_definition: SettingDefinition) -> None:
+        children = setting_definition.children
+        if not children or not setting_definition.parent:
+            return
+
+        # make sure this setting is expanded so its children show up  in setting views
+        if setting_definition.parent.key in self._expanded_categories:
+            self._expanded_categories.append(setting_definition.key)
+
+        for child in children:
+            container._definition_cache[child.key] = child
+            self._updateAddedChildren(container, child)
 
     def _filterGcode(self, output_device):
         scene = self._application.getController().getScene()
@@ -80,6 +114,7 @@ class FirmwareRetractionSettingsPlugin(Extension):
 
         # get setting from Cura
         initialize_firmware_retraction = global_container_stack.getProperty("initialize_firmware_retraction", "value")
+        remove_zhops = global_container_stack.getProperty("remove_slicer_z_hops", "value")
         if not initialize_firmware_retraction:
             return
 
@@ -116,16 +151,17 @@ class FirmwareRetractionSettingsPlugin(Extension):
                 gcode_list[0] += ";FIRMWARERETRACTIONPROCESSED\n"
                 gcode_list[1] += firmwareRetraction + firmwareRecover
 
-                for layer_nr, layer in enumerate(gcode_list):
-                    lines = layer.split("\n")
-                    lines_changed = False
-                    for line_nr, line in enumerate(lines):
-                        if "G10" in line and z_hop_regex.fullmatch(lines[line_nr + 1]):
-                            lines[line_nr + 1] = '; Z HOP REMOVED BY FIRMWARE RETRACTION SETTINGS PLUGIN'
-                        if "G11" in line and z_hop_regex.fullmatch(lines[line_nr - 1]):
-                            lines[line_nr - 1] = '; Z HOP REMOVED BY FIRMWARE RETRACTION SETTINGS PLUGIN'
-                        
-                    gcode_list[layer_nr] = "\n".join(lines)
+                if remove_zhops:
+                    for layer_nr, layer in enumerate(gcode_list):
+                        lines = layer.split("\n")
+                        lines_changed = False
+                        for line_nr, line in enumerate(lines):
+                            if "G10" in line and z_hop_regex.fullmatch(lines[line_nr + 1]):
+                                lines[line_nr + 1] = '; Z HOP REMOVED BY FIRMWARE RETRACTION SETTINGS PLUGIN'
+                            if "G11" in line and z_hop_regex.fullmatch(lines[line_nr - 1]):
+                                lines[line_nr - 1] = '; Z HOP REMOVED BY FIRMWARE RETRACTION SETTINGS PLUGIN'
+                            
+                        gcode_list[layer_nr] = "\n".join(lines)
 
 
                 gcode_dict[plate_id] = gcode_list
